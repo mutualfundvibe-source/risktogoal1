@@ -5,20 +5,20 @@ import math
 
 app = FastAPI(
     title="Risk → Goal API",
-    description="Calculates SIP required for a target using risk-based return assumptions and 7% inflation.",
+    description="Calculates SIP/lumpsum required for a target using risk-based return assumptions and 7% inflation.",
     version="1.0.0",
 )
 
-# CORS (open for demo; you can restrict to your domain later)
+# Allow frontend (Netlify) to call API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # replace with ["https://yourdomain.com"] when live
+    allow_origins=["*"],  # later restrict to your Netlify domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Core assumptions ---
+# --- Assumptions ---
 INFLATION = 0.07  # 7% p.a.
 RISK_RETURN = {
     "low": 0.105,       # 10.5%
@@ -26,82 +26,80 @@ RISK_RETURN = {
     "high": 0.155,      # 15.5%
 }
 
-def inflate_goal(present_value: float, years: int, inflation: float = INFLATION) -> float:
-    """Future value of a goal after inflation."""
-    return present_value * ((1 + inflation) ** years)
+# --- Helper functions ---
+def inflate_goal(pv: float, years: int, inflation: float = INFLATION) -> float:
+    return pv * ((1 + inflation) ** years)
 
 def sip_required(goal_fv: float, annual_return: float, years: int) -> float:
-    """
-    SIP PMT for target FV:
-      PMT = FV * r / ((1+r)^n - 1)
-    where r = monthly return, n = months
-    """
     months = years * 12
     r = annual_return / 12.0
     if months <= 0 or r <= 0:
         return 0.0
-    denom = (1 + r) ** months - 1
-    return (goal_fv * r) / denom if denom != 0 else 0.0
+    return goal_fv * r / (((1 + r) ** months) - 1)
 
-def future_value_of_sip(pmt: float, annual_return: float, years: int) -> float:
-    """FV of a monthly SIP: FV = PMT * [((1+r)^n - 1)/r]"""
+def fv_of_sip(pmt: float, annual_return: float, years: int) -> float:
     months = years * 12
     r = annual_return / 12.0
     if months <= 0 or r <= 0:
         return 0.0
     return pmt * (((1 + r) ** months - 1) / r)
 
+def lumpsum_required(goal_fv: float, annual_return: float, years: int) -> float:
+    return goal_fv / ((1 + annual_return) ** years)
+
+def fv_of_lumpsum(pv: float, annual_return: float, years: int) -> float:
+    return pv * ((1 + annual_return) ** years)
+
+# --- Endpoints ---
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 @app.get("/risk-to-goal")
 def risk_to_goal(
-    target_corpus: float = Query(..., gt=0, description="Goal in today's rupees, e.g. 1000000"),
-    risk_level: Literal["low", "moderate", "high"] = Query(...),
-    years: int = Query(..., gt=0, description="Time horizon in years"),
-    inflation: float = Query(INFLATION, ge=0.0, le=0.2, description="Override if needed, default 7%"),
+    target_corpus: float = Query(..., gt=0),
+    risk_level: Literal["low","moderate","high"] = Query(...),
+    years: int = Query(..., gt=0),
+    inflation: float = INFLATION
 ):
-    """
-    Returns inflation-adjusted target (FV) and required SIP using risk-based expected return.
-    """
     annual_return = RISK_RETURN[risk_level]
     inflated_goal = inflate_goal(target_corpus, years, inflation)
     sip = sip_required(inflated_goal, annual_return, years)
+    lump = lumpsum_required(inflated_goal, annual_return, years)
 
     return {
         "inputs": {
-            "target_corpus_today": round(target_corpus, 2),
+            "target_today": target_corpus,
             "risk_level": risk_level,
             "years": years,
             "assumed_inflation": inflation,
             "assumed_return": annual_return,
         },
         "outputs": {
-            "inflation_adjusted_target_fv": round(inflated_goal, 0),
-            "estimated_monthly_sip": round(sip, 0),
+            "inflated_goal_fv": round(inflated_goal, 0),
+            "required_sip": round(sip, 0),
+            "required_lumpsum": round(lump, 0)
         }
     }
 
-@app.get("/projected-corpus")
-def projected_corpus(
-    monthly_sip: float = Query(..., gt=0, description="Monthly SIP amount"),
-    risk_level: Literal["low", "moderate", "high"] = Query(...),
-    years: int = Query(..., gt=0),
+@app.get("/projected-sip")
+def projected_sip(
+    monthly_sip: float = Query(..., gt=0),
+    risk_level: Literal["low","moderate","high"] = Query(...),
+    years: int = Query(..., gt=0)
 ):
-    """
-    Reverse calc: given SIP + years + risk level, what corpus could you reach (FV)?
-    """
     annual_return = RISK_RETURN[risk_level]
-    fv = future_value_of_sip(monthly_sip, annual_return, years)
-    return {
-        "inputs": {
-            "monthly_sip": round(monthly_sip, 2),
-            "risk_level": risk_level,
-            "years": years,
-            "assumed_return": annual_return,
-        },
-        "outputs": {
-            "projected_corpus_fv": round(fv, 0)
-        }
-    }
+    fv = fv_of_sip(monthly_sip, annual_return, years)
+    return {"inputs": {"sip": monthly_sip,"risk": risk_level,"years": years},
+            "outputs": {"projected_corpus": round(fv, 0)}}
+
+@app.get("/projected-lumpsum")
+def projected_lumpsum(
+    lumpsum: float = Query(..., gt=0),
+    risk_level: Literal["low","moderate","high"] = Query(...),
+    years: int = Query(..., gt=0)
+):
+    annual_return = RISK_RETURN[risk_level]
+    fv = fv_of_lumpsum(lumpsum, annual_return, years)
+    return {"inputs": {"lumpsum": lumpsum,"risk": risk_level,"years": years},
+            "outputs": {"projected_corpus": round(fv, 0)}}
